@@ -1,56 +1,42 @@
-# S7 Airlines Procurement Optimization Model
+# S7 Airlines Procurement Optimization Model (Enhanced)
 
 ## Overview
-This solution provides a comprehensive procurement plan for S7 Airlines for the period 01.09.2025 – 01.09.2026. The model analyzes historical consumption and order data to optimize inventory levels for 5 distinct product categories.
+This solution provides a high-precision procurement plan for S7 Airlines for the period **01.09.2025 – 01.09.2026**. Unlike the initial baseline, this enhanced version performs forecasting and inventory planning at the **individual product level (SKU)** rather than the aggregate category level, ensuring specific needs for every component are met.
 
 ## Methodology
 
-### 1. Data Analysis (EDA)
-- **Consumption Data**: Aggregated by product category to understand demand patterns, volatility, and seasonality.
-- **Orders Data**: Used to calculate historical Lead Times and unit prices.
-- **Key Metrics**:
-  - **Demand Volatility (CV)**: Used to determine inventory strategy.
-  - **Lead Time Variability**: Used for Safety Stock calculation.
+### 1. Hybrid Forecasting Strategy
+We implemented a dynamic model selection pipeline based on the demand patterns of each category:
 
-### 2. Demand Forecasting
-- **Model**: **Prophet** (Facebook)
-- **Rationale**: Prophet is robust to missing data and handles seasonality (weekly/yearly) well, which is crucial for logistics. It also provides uncertainty intervals.
-- **Aggregation**: Daily demand aggregation was used to capture granular patterns.
-- **Horizon**: 12 months (365 days).
+| Category | Demand Type | Aggregation | Model | Rationale |
+| :--- | :--- | :--- | :--- | :--- |
+| **0, 1** | **Intermittent / Rare** | Monthly (`MS`) | **TSB (Teunter-Syntetos-Babai)** | Best suited for sparse data with many zeros. Estimates demand probability and size separately. |
+| **3** | **Mass / High Volatility** | Weekly (`W`) | **Prophet** | Captures complex seasonality (weekly/yearly) and trend shifts better than simple smoothing. |
+| **2, 4** | **Regular / Stable** | Monthly (`MS`) | **Prophet** | Robust forecasting for standard consumption patterns. |
 
-### 3. Price Forecasting
-- **Strategy**:
-  - **Low Volatility (CV < 0.1)**: Used historical average price.
-  - **High Volatility**: Used Prophet to forecast price trends, ensuring non-negative prices.
+*Note: The TSB model was implemented from scratch using NumPy to avoid heavy dependencies like `statsforecast` requiring Fortran compilers.*
 
-### 4. Inventory Optimization
-- **Policy**: Continuous Review (s, Q) / Periodic Review hybrid simulation.
-- **Parameters**:
-  - **Safety Stock (SS)**: Calculated based on service level (95%) and demand/lead time variability.
-    - Formula: $SS = Z \times \sigma_{demand} \times \sqrt{LT}$
-  - **Reorder Point (ROP)**: Inventory level at which a new order is triggered.
-    - Formula: $ROP = \text{Avg Demand} \times \text{Avg LT} + SS$
-  - **Order Quantity**: Dynamic calculation based on target inventory coverage (30 days) + Safety Stock.
-    - Logic: Order enough to cover expected demand during lead time + review period + safety buffer.
+### 2. Product-Level Granularity
+- **Demand:** Forecasts are generated for each unique `product_id`.
+- **Lead Time:** Calculated based on the specific order history of the product.
+- **Price:** Forecasted per product using historical trends.
+- **Fallback Mechanism:** If a specific product lacks sufficient history (e.g., new or extremely rare items), the system automatically falls back to **Category Averages** for Lead Time and Price to ensure continuity.
 
-### 5. Procurement Plan Generation
-- The simulation runs daily for the planning horizon.
-- Orders are placed when projected inventory falls below ROP.
-- Output includes `order_date`, `product_category`, `amount` (estimated cost), and `qty`.
+### 3. Inventory Optimization
+The model simulates inventory levels on a **daily basis** to determine exactly when to order:
+- **Safety Stock (SS):** Dynamic calculation based on demand variability ($\sigma_{demand}$) and Lead Time ($\sqrt{LT}$).
+- **Reorder Point (ROP):** Triggers an order when `Inventory Position <= ROP`.
+- **Order Quantity:** Calculated to cover the review period plus safety stock, respecting minimum order quantities.
 
-## Results Summary by Category
+### 4. Data Processing
+- **Temporal Alignment:** Weekly and Monthly forecasts are interpolated to daily rates to interact seamlessly with the daily inventory simulation.
+- **Gap Filling:** For intermittent series, missing dates are rigorously filled with zeros to prevent model bias.
 
-| Category | Strategy | Mean Lead Time (Days) | Safety Stock | ROP | First Order Qty |
-|----------|----------|-----------------------|--------------|-----|-----------------|
-| **0** | JIT / ROP | 81.8 | 8.4 | 14.3 | ~10 |
-| **1** | High Value / Low Stock | 40.8 | 2.6 | 5.0 | ~10 |
-| **2** | High Volatility / Buffer | 93.2 | 633.6 | 1037.3 | ~150 |
-| **3** | High Volume / Frequent | 44.0 | 6318.5 | 14264.5 | ~5600 |
-| **4** | Stable / Periodic | 69.9 | 48.3 | 441.7 | ~170 |
+## Key Files
+- `improved_main.py`: The orchestration script running the full pipeline.
+- `src/models.py`: Custom implementations of TSB and Prophet wrappers.
+- `src/optimization.py`: Inventory logic supporting variable forecast frequencies.
+- `output_improved/procurement_plan.csv`: The final detailed schedule containing `product_id`, `order_date`, `amount`, and `qty`.
 
-*Note: Quantities are approximate based on initial simulation run.*
-
-## Files
-- `procurement_plan.csv`: The detailed procurement schedule.
-- `src/`: Source code for the solution (modular Python).
-- `output/`: Generated plots for forecasts and lead time distributions.
+## Results
+The resulting plan minimizes stockouts for high-velocity items (Category 3) by checking status weekly, while maintaining efficient buffer stocks for expensive, slow-moving parts (Category 0/1).
