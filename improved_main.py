@@ -70,7 +70,15 @@ def main():
     categories = df_consumption['product_category'].unique()
     all_plans = []
     
+    # Exclusions
+    EXCLUDED_CATEGORIES = [1]
+    EXCLUDED_PRODUCTS = [49, 43, 55, 41, 40, 52, 57, 53, 62, 45, 46, 47, 42, 21]
+
     for category in categories:
+        if category in EXCLUDED_CATEGORIES:
+            logger.info(f"Skipping excluded Category: {category}")
+            continue
+
         logger.info(f"=== Processing Category: {category} ===")
         
         # Category Level Data
@@ -90,6 +98,10 @@ def main():
         logger.info(f"Found {len(products)} products in category {category}")
         
         for product_id in products:
+            if product_id in EXCLUDED_PRODUCTS:
+                logger.info(f"Skipping excluded Product: {product_id}")
+                continue
+
             # Product Level Data
             prod_consumption = cat_consumption_all[cat_consumption_all['product_id'] == product_id].copy()
             prod_orders = cat_orders_all[cat_orders_all['product_id'] == product_id].copy()
