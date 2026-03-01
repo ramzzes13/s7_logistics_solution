@@ -16,18 +16,23 @@ class InventoryOptimizer:
     def calculate_lead_time_params(self, df_orders):
         """
         Calculates mean and std of lead time (in days).
+        Returns None, None if not enough data.
         """
+        if df_orders is None or df_orders.empty:
+            return None, None
+
         if 'lead_time_days' not in df_orders.columns:
+            df_orders = df_orders.copy()
             df_orders['lead_time_days'] = (pd.to_datetime(df_orders['delivery_date']) - pd.to_datetime(df_orders['order_date'])).dt.days
             
-        mean_lt = df_orders['lead_time_days'].mean()
-        std_lt = df_orders['lead_time_days'].std()
-        
-        # Handle cases with 1 or 0 orders
-        if pd.isna(mean_lt):
-            mean_lt = 7 # Default fallback
-            std_lt = 0
+        # Drop NaNs
+        lt_data = df_orders['lead_time_days'].dropna()
+        if len(lt_data) == 0:
+            return None, None
             
+        mean_lt = lt_data.mean()
+        std_lt = lt_data.std()
+        
         if pd.isna(std_lt):
             std_lt = 0
             
@@ -50,67 +55,65 @@ class InventoryOptimizer:
         rop = demand_mean * lead_time_mean + safety_stock
         return rop
 
-    def calculate_eoq(self, annual_demand, ordering_cost, holding_cost_per_unit):
-        """
-        Calculates Economic Order Quantity.
-        EOQ = sqrt(2 * D * S / H)
-        """
-        if holding_cost_per_unit <= 0:
-            return annual_demand / 12 # Fallback to monthly demand
-            
-        eoq = np.sqrt((2 * annual_demand * ordering_cost) / holding_cost_per_unit)
-        return eoq
-
-    def generate_procurement_plan(self, category, demand_forecast, price_forecast, lead_time_mean, 
+    def generate_procurement_plan(self, product_id, category, demand_forecast, price_forecast, lead_time_mean, 
                                   current_inventory=0, safety_stock=0, reorder_point=0, 
-                                  batch_size=None, min_order_qty=0, avg_daily_demand=0):
+                                  batch_size=None, min_order_qty=0, avg_daily_demand=0, freq='D'):
         """
-        Simulates inventory and generates orders.
-        demand_forecast: DataFrame with 'ds' and 'yhat' (daily demand).
-        price_forecast: DataFrame with 'ds' and 'yhat' (daily price).
+        Simulates inventory and generates orders for a specific product.
         """
-        self.logger.info(f"Generating procurement plan for {category}...")
+        # self.logger.info(f"Generating plan for Product {product_id} (Cat {category}, Freq: {freq})...")
+        
+        # Convert aggregated forecast to daily for simulation if needed
+        if freq != 'D':
+            df_daily = demand_forecast.set_index('ds').resample('D').asfreq()
+            
+            # Forward fill the rate, but divide by days in period
+            if freq == 'W':
+                divider = 7
+            elif freq == 'MS':
+                divider = 30 # Approx
+            else:
+                divider = 1
+                
+            # Fill with previous known rate / divider
+            df_daily['yhat'] = demand_forecast.set_index('ds').reindex(df_daily.index).ffill()['yhat'] / divider
+            df_daily = df_daily.reset_index()
+            demand_forecast = df_daily
         
         plan = []
-        # Initial inventory assumption
         inventory = reorder_point 
         
         pending_orders = [] # List of (arrival_date, qty)
         
-        # Merge forecasts to align dates
-        # Use left join on demand forecast to ensure we cover the demand period
+        # Merge forecasts
         df_merged = pd.merge(demand_forecast, price_forecast, on='ds', how='left', suffixes=('_demand', '_price'))
         df_merged = df_merged.sort_values('ds')
         
-        # Fill missing prices with ffill or mean
+        # Fill missing prices
         if df_merged['yhat_price'].isnull().any():
-            self.logger.warning(f"Missing price forecasts for {category}. Filling with last known or mean.")
             df_merged['yhat_price'] = df_merged['yhat_price'].ffill().bfill()
             if df_merged['yhat_price'].isnull().all():
-                 df_merged['yhat_price'] = 1.0 # Absolute fallback
+                 df_merged['yhat_price'] = 1.0 # Default if absolutely no price info
         
-        # We simulate day by day
+        # Simulation
         for idx, row in df_merged.iterrows():
             current_date = row['ds']
             daily_demand = max(0, row['yhat_demand'])
-            unit_price = max(0, row['yhat_price']) # Ensure positive price
+            unit_price = max(0, row['yhat_price'])
             
             # Check for arriving orders
             arrived_qty = sum([o[1] for o in pending_orders if o[0] <= current_date])
-            # Remove arrived orders
             pending_orders = [o for o in pending_orders if o[0] > current_date]
             
             inventory += arrived_qty
             inventory -= daily_demand
             
             # Check reorder point
-            # Calculate inventory position (Inventory + On Order)
             inventory_position = inventory + sum([o[1] for o in pending_orders])
             
             if inventory_position <= reorder_point:
-                # Place order
-                # Target level logic: Order up to cover X days (e.g., 30 days) + Safety Stock
-                days_coverage = 30 # Default monthly replenishment logic
+                # Order logic
+                days_coverage = 30 
                 target_level = reorder_point + (avg_daily_demand * days_coverage)
                 
                 if target_level <= reorder_point:
@@ -118,15 +121,14 @@ class InventoryOptimizer:
                 
                 order_qty = target_level - inventory_position
                 
+                # Apply Batch Size
                 if batch_size:
-                    # Round to batch size
                     batches = np.ceil(order_qty / batch_size)
                     order_qty = batches * batch_size
                 
                 if order_qty < min_order_qty:
                     order_qty = min_order_qty
                 
-                # Round to nearest integer
                 order_qty = int(np.ceil(order_qty))
                 
                 if order_qty > 0:
@@ -136,6 +138,7 @@ class InventoryOptimizer:
                     amount = order_qty * unit_price
                     
                     plan.append({
+                        'product_id': product_id,
                         'product_category': category,
                         'order_date': current_date,
                         'amount': amount,
